@@ -1,24 +1,45 @@
 import pandas as pd
 import os
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 
 # === CONFIGURATIE ===
-ENDTIME_DELTA_HOURS = 2  # Aantal uren na starttijd
-INPUT_PATH = './downloads/www_volleyscores_be_20250621.xls'
-OUTPUT_DIR = './matches'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+ENDTIME_DELTA_HOURS = 2  # Standaard eindtijd na starttijd
 
-# Lees Excel-bestand met dynamische kolomdetectie
+# Normale wedstrijdconfiguratie
+MEET_UP_DELTAS = {
+    "Nationale 3 Heren A": 1.5,
+    "HEREN PROMO 3B": 1.0,
+    "Interfederale Beker Heren": 1.5,
+    # ... andere reguliere teams
+}
+DEFAULT_MEET_UP_DELTA = 1.0
+
+# Cupwedstrijdconfiguratie (apart)
+CUP_MEET_UP_DELTAS = {
+    "BEKER TROFEE WALRAEVE": 1.0,
+    "PROVINCIALE BEKER HEREN": 4.0,
+    "JEUGDBEKER JONGENS U19": 0.5,
+    "JEUGDBEKER JONGENS U17": 0.75,
+    "JEUGDBEKER JONGENS U15": 1.0,
+    "JEUGDBEKER JONGENS U13": 1.25,
+    "JEUGDBEKER JONGENS U11": 1.5,
+    # Voeg nieuwe bekerwedstrijden toe
+}
+DEFAULT_CUP_MEET_UP_DELTA = 1.25
+
+input_path = './downloads/www_volleyscores_be_20250621.xls'
+output_dir = './matches'
+os.makedirs(output_dir, exist_ok=True)
+
+# Lees Excel-bestand
 try:
-    df = pd.read_excel(INPUT_PATH, engine='xlrd', header=0)
-    print("Excel-bestand succesvol gelezen")
+    df = pd.read_excel(input_path, engine='xlrd')
+    print("XLS-bestand succesvol gelezen")
     
-    # Normaliseer kolomnamen: verwijder spaties, maak kleine letters
-    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
-    
-    # Toon beschikbare kolommen voor debugging
-    print("Beschikbare kolommen:", df.columns.tolist())
+    # Normaliseer kolomnamen
+    df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
     
     # Controleer vereiste kolommen
     vereiste_kolommen = {'reeks', 'datum', 'uur', 'thuis', 'bezoekers', 'sporthall'}
@@ -27,39 +48,52 @@ try:
         raise KeyError(f"Ontbrekende kolommen: {', '.join(ontbrekend)}")
 
 except Exception as e:
-    print(f"Fout bij lezen: {e}")
+    print(f"Fout bij lezen XLS: {e}")
     raise
 
-# Verzamel clubnamen die met "Sferos VBK" beginnen
-clubnamen = set()
-for kolom in ['thuis', 'bezoekers']:
-    clubnamen.update(
-        str(naam).strip()
-        for naam in df[kolom].unique()
-        if 'sferos vbk' in str(naam).lower()
-    )
-print(f"Gevonden clubnamen: {', '.join(clubnamen)}")
+# Bepaal of het een cupwedstrijd is
+def is_cup_match(reeks):
+    cup_keywords = ["beker", "cup", "jeugdbeker", "trofee", "bekerwedstrijd"]
+    return any(keyword in reeks.lower() for keyword in cup_keywords)
 
 # Transformeer rij naar gewenst formaat
 def transform_row(row):
-    # Bepaal matchtype
-    thuis_team = str(row['thuis']).strip()
-    uit_team = str(row['bezoekers']).strip()
-    match_type = "Home match" if any(club in thuis_team for club in clubnamen) else "Away match"
+    reeks = str(row['reeks']).strip()
+    start_date = row['datum']
+    start_time = row['uur']
+    
+    # Bepaal configuratie op basis van wedstrijdtype
+    if is_cup_match(reeks):
+        meet_up_delta = CUP_MEET_UP_DELTAS.get(reeks, DEFAULT_CUP_MEET_UP_DELTA)
+    else:
+        meet_up_delta = MEET_UP_DELTAS.get(reeks, DEFAULT_MEET_UP_DELTA)
+    
+    # Bereken meet-up tijd
+    try:
+        start_dt = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %H:%M")
+        meet_up_dt = start_dt - timedelta(hours=meet_up_delta)
+        meet_up_time = meet_up_dt.strftime("%H:%M")
+    except:
+        meet_up_time = ""
     
     # Bereken eindtijd
     try:
-        start_dt = datetime.strptime(f"{row['datum']} {row['uur']}", "%d/%m/%Y %H:%M")
-        eind_tijd = (start_dt + timedelta(hours=ENDTIME_DELTA_HOURS)).strftime("%H:%M")
+        end_dt = start_dt + timedelta(hours=ENDTIME_DELTA_HOURS)
+        end_time = end_dt.strftime("%H:%M")
     except:
-        eind_tijd = ""
+        end_time = ""
+    
+    # Bepaal matchtype
+    thuis_team = str(row['thuis']).strip()
+    uit_team = str(row['bezoekers']).strip()
+    match_type = "Home match" if "Sferos VBK" in thuis_team else "Away match"
     
     return {
-        'Start date': row['datum'],
-        'start time': row['uur'],
-        'meet up': '',
-        'end data': row['datum'],
-        'end time': eind_tijd,
+        'Start date': start_date,
+        'start time': start_time,
+        'meet up': meet_up_time,
+        'end data': start_date,
+        'end time': end_time,
         'match type': match_type,
         'home team': thuis_team,
         'away team': uit_team,
@@ -69,15 +103,16 @@ def transform_row(row):
 
 # Verwerk per reeks
 for reeks in df['reeks'].dropna().unique():
-    subset = df[df['reeks'] == reeks]
-    getransformeerd = pd.DataFrame([transform_row(row) for _, row in subset.iterrows()])
+    df_reeks = df[df['reeks'] == reeks]
+    transformed_data = [transform_row(row) for _, row in df_reeks.iterrows()]
+    transformed = pd.DataFrame(transformed_data)
     
     # Genereer bestandsnaam
-    veilige_naam = reeks.replace(' ', '_').replace('/', '_').replace('-', '_')
-    uitvoerpad = os.path.join(OUTPUT_DIR, f"{veilige_naam}.xlsx")
+    safe_reeks = reeks.replace(' ', '_').replace('/', '_').replace('-', '_')
+    output_path = os.path.join(output_dir, f"{safe_reeks}.xlsx")
     
-    # Opslaan
-    getransformeerd.to_excel(uitvoerpad, index=False)
-    print(f"Aangemaakt: {uitvoerpad}")
+    # Opslaan als Excel
+    transformed.to_excel(output_path, index=False)
+    print(f"Aangemaakt: {output_path}")
 
 print("Verwerking voltooid! Bestanden staan in de map 'matches'")
