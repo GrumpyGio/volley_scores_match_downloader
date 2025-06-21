@@ -1,69 +1,83 @@
 import pandas as pd
 import os
 from pathlib import Path
+from datetime import datetime, timedelta
 
-# Configuratiepaden
-input_path = './downloads/www_volleyscores_be_20250621.xls'
-output_dir = './matches'
+# === CONFIGURATIE ===
+ENDTIME_DELTA_HOURS = 2  # Aantal uren na starttijd
+INPUT_PATH = './downloads/www_volleyscores_be_20250621.xls'
+OUTPUT_DIR = './matches'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Uitvoermap aanmaken
-os.makedirs(output_dir, exist_ok=True)
-
-# Bestand lezen als Excel met juiste engine
+# Lees Excel-bestand met dynamische kolomdetectie
 try:
-    df = pd.read_excel(input_path, engine='openpyxl')
-    print("XLS-bestand succesvol gelezen met openpyxl engine")
+    df = pd.read_excel(INPUT_PATH, engine='xlrd', header=0)
+    print("Excel-bestand succesvol gelezen")
+    
+    # Normaliseer kolomnamen: verwijder spaties, maak kleine letters
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    
+    # Toon beschikbare kolommen voor debugging
+    print("Beschikbare kolommen:", df.columns.tolist())
+    
+    # Controleer vereiste kolommen
+    vereiste_kolommen = {'reeks', 'datum', 'uur', 'thuis', 'bezoekers', 'sporthall'}
+    if not vereiste_kolommen.issubset(set(df.columns)):
+        ontbrekend = vereiste_kolommen - set(df.columns)
+        raise KeyError(f"Ontbrekende kolommen: {', '.join(ontbrekend)}")
+
 except Exception as e:
-    print(f"Fout bij lezen XLS: {e}")
-    print("Probeer alternatieve engine...")
-    try:
-        df = pd.read_excel(input_path, engine='xlrd')
-        print("XLS-bestand gelezen met xlrd engine")
-    except:
-        raise ValueError("Kon Excel-bestand niet lezen. Controleer bestandsformaat.")
+    print(f"Fout bij lezen: {e}")
+    raise
 
-# Kolomnamen controleren en corrigeren
-if 'Reeks' not in df.columns:
-    if 'reeks' in [c.lower() for c in df.columns]:
-        df = df.rename(columns={c: 'Reeks' for c in df.columns if c.lower() == 'reeks'})
-    else:
-        raise KeyError("Kolom 'Reeks' niet gevonden in bestand. Beschikbare kolommen: " + ", ".join(df.columns))
+# Verzamel clubnamen die met "Sferos VBK" beginnen
+clubnamen = set()
+for kolom in ['thuis', 'bezoekers']:
+    clubnamen.update(
+        str(naam).strip()
+        for naam in df[kolom].unique()
+        if 'sferos vbk' in str(naam).lower()
+    )
+print(f"Gevonden clubnamen: {', '.join(clubnamen)}")
 
-# Transformatiemapping
-output_columns = [
-    'Start date', 'start time', 'meet up', 'end data', 'end time',
-    'match type', 'home team', 'away team', 'description', 'place'
-]
-
+# Transformeer rij naar gewenst formaat
 def transform_row(row):
+    # Bepaal matchtype
+    thuis_team = str(row['thuis']).strip()
+    uit_team = str(row['bezoekers']).strip()
+    match_type = "Home match" if any(club in thuis_team for club in clubnamen) else "Away match"
+    
+    # Bereken eindtijd
+    try:
+        start_dt = datetime.strptime(f"{row['datum']} {row['uur']}", "%d/%m/%Y %H:%M")
+        eind_tijd = (start_dt + timedelta(hours=ENDTIME_DELTA_HOURS)).strftime("%H:%M")
+    except:
+        eind_tijd = ""
+    
     return {
-        'Start date': row['Datum'],
-        'start time': row['Uur'],
+        'Start date': row['datum'],
+        'start time': row['uur'],
         'meet up': '',
-        'end data': row['Datum'],
-        'end time': row['Uur'],
-        'match type': row['Reeks'],
-        'home team': row['Thuis'],
-        'away team': row['Bezoekers'],
+        'end data': row['datum'],
+        'end time': eind_tijd,
+        'match type': match_type,
+        'home team': thuis_team,
+        'away team': uit_team,
         'description': '',
-        'place': row['Sporthall']
+        'place': str(row['sporthall']).strip()
     }
 
-# Verwerking per teamcategorie
-for reeks in df['Reeks'].dropna().unique():
-    # Filteren op teamcategorie
-    df_reeks = df[df['Reeks'] == reeks]
+# Verwerk per reeks
+for reeks in df['reeks'].dropna().unique():
+    subset = df[df['reeks'] == reeks]
+    getransformeerd = pd.DataFrame([transform_row(row) for _, row in subset.iterrows()])
     
-    # Transformeren naar gewenst formaat
-    transformed_data = [transform_row(row) for _, row in df_reeks.iterrows()]
-    transformed = pd.DataFrame(transformed_data)
+    # Genereer bestandsnaam
+    veilige_naam = reeks.replace(' ', '_').replace('/', '_').replace('-', '_')
+    uitvoerpad = os.path.join(OUTPUT_DIR, f"{veilige_naam}.xlsx")
     
-    # Bestandsnaam veilig maken
-    safe_reeks = reeks.replace(' ', '_').replace('/', '_').replace('-', '_')
-    output_path = os.path.join(output_dir, f"{safe_reeks}.xlsx")
-    
-    # Opslaan als Excel
-    transformed.to_excel(output_path, index=False, columns=output_columns)
-    print(f"Aangemaakt: {output_path}")
+    # Opslaan
+    getransformeerd.to_excel(uitvoerpad, index=False)
+    print(f"Aangemaakt: {uitvoerpad}")
 
 print("Verwerking voltooid! Bestanden staan in de map 'matches'")
